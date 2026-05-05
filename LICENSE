@@ -1,0 +1,24 @@
+3DMolDesignBench Evaluation & Conditional Use License
+
+By accessing or using this repository and its associated code and data, you agree to the following terms and conditions.
+
+1. EXPLICIT PROHIBITION ON TRAINING WITH BENCHMARK DATA
+To preserve the integrity of this benchmark, you are strictly prohibited from using the specific evaluation conditions, prompts, datasets, or any derivatives thereof contained in this repository as a training signal or to structurally alter the weights of any machine learning model. 
+* This data may ONLY be used for inference-based evaluation.
+* Using this specific benchmark data for Supervised Fine-Tuning (SFT), Reinforcement Learning (RL), preference-based optimization, or as synthetic data to distill other models is a direct violation of this license.
+
+2. ACADEMIC USE & NON-COMMERCIAL RESTRICTION
+Subject to the data-training restrictions above, you are granted permission to copy, modify, and use this material strictly for academic, non-commercial research, and evaluation purposes. You may not use any material in this repository for commercial purposes. 
+* This includes, but is not limited to, integrating the code into paid products, commercial APIs, proprietary enterprise systems, or commercializing the outputs of this benchmark.
+* Furthermore, this material may not be used to develop, fine-tune, or evaluate general-purpose models by or for commercial entities, regardless of whether the resulting model weights are subsequently made publicly available.
+
+3. ATTRIBUTION & SHARE-ALIKE
+If you use this material, you must give appropriate credit, provide a link to this repository, and indicate if any permitted changes were made. If you distribute modified versions of this benchmark's codebase or dataset for research purposes, you must release them under these exact same license terms. 
+
+4. CONDITIONAL PERMISSION FOR REWARD FUNCTION USE
+As an explicit exception to the training ban in Section 1, you are granted permission to use the reward functions and simulation codebase provided in this repository to train or optimize models (e.g., via RL), subject to the following strict conditions:
+* The training data/prompts must be entirely your own (you may not train on the restricted benchmark conditions outlined in Section 1).
+* The training process and the resulting model must strictly adhere to the Non-Commercial and Academic requirements outlined in Section 2.
+
+5. DISCLAIMER OF WARRANTY
+This repository is provided "AS IS", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose, and non-infringement. In no event shall the authors or copyright holders be liable for any claim, damages, or other liability arising from, out of, or in connection with the software or the use or other dealings in the software.

@@ -42,10 +42,10 @@ def resolve_unidock_executable() -> str:
     env = os.environ.get("UNIDOCK_BIN")
     if not env:
         raise ValueError(
-            "UniDock executable not found on PATH (command 'unidock') and "
-            "environment variable UNIDOCK_BIN is not set. "
-            "Install UniDock and add it to PATH, or set UNIDOCK_BIN to the "
-            "full path of the unidock binary."
+            "UniDock executable not found on PATH (command 'unidock') and environment "
+            "variable UNIDOCK_BIN is not set. Unidock isn't installed in the environment "
+            "during pip installation and needs to be installed separately. "
+            "See the README.md for instructions on installing UniDock."
         )
     if not (os.path.isfile(env) and os.access(env, os.X_OK)):
         raise ValueError(

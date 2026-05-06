@@ -1,5 +1,5 @@
 # 3D-Fit Benchmark
-The Benchmark for 3D Molecular Design: Do Language Models Dream of Binding Molecules? Benchmarking LLMs under Spatial Constraints
+Benchmarking Code for: Do Language Models Dream of Binding Molecules? Benchmarking LLMs under Spatial Constraints
 
 Scoring and evaluation framework for 3D **generative chemistry** models with 3D conditions.  Your generator stays outside the package — you pass in RDKit molecules (or LLM completion strings according to the included prompts) and get back scored DataFrames for your molecules (Parquet / CSV) plus aggregated metrics.
 

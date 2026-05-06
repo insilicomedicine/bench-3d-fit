@@ -1,0 +1,204 @@
+"""
+Helpers for reward scoring that are not tied to a single ``RewardFunction``.
+
+Receptor handling for UniDock uses :func:`pdb_to_pdbqt` (ProDy + RDKit + UniDock
+tools) so ``rewards.py`` stays focused on reward classes.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import os
+import shutil
+import threading
+from io import StringIO
+
+import numpy as np
+from typing import Any, Dict, List, Optional, Union
+from pmapper.pharmacophore import Pharmacophore as PH4
+
+import prody
+from rdkit import Chem
+from rdkit.Chem import SanitizeFlags
+from unidock_tools.modules.protein_prep.pdb2pdbqt import receptor_mol_to_pdbqt_str
+import prolif as plf
+
+logger = logging.getLogger(__name__)
+
+
+def resolve_unidock_executable() -> str:
+    """
+    Locate the UniDock binary: :func:`shutil.which` for the ``unidock`` command
+    on ``PATH``, otherwise the ``UNIDOCK_BIN`` environment variable.
+
+    Raises:
+        ValueError: If ``unidock`` is not on ``PATH`` and ``UNIDOCK_BIN`` is
+            unset, or if ``UNIDOCK_BIN`` is set but is not an executable file.
+    """
+    path_exe = shutil.which("unidock")
+    if path_exe:
+        return path_exe
+    env = os.environ.get("UNIDOCK_BIN")
+    if not env:
+        raise ValueError(
+            "UniDock executable not found on PATH (command 'unidock') and "
+            "environment variable UNIDOCK_BIN is not set. "
+            "Install UniDock and add it to PATH, or set UNIDOCK_BIN to the "
+            "full path of the unidock binary."
+        )
+    if not (os.path.isfile(env) and os.access(env, os.X_OK)):
+        raise ValueError(
+            f"UNIDOCK_BIN is set to {env!r} but it is not a valid executable file."
+        )
+    return os.path.abspath(env)
+
+
+def pdb_to_pdbqt(pdb_str: str) -> str:
+    """
+    Convert a PDB string to a PDBQT string using ProDy, RDKit and UniDock tools.
+    """
+    if not pdb_str.strip():
+        raise ValueError("PDB input is empty.")
+
+    res = prody.parsePDBStream(StringIO(pdb_str))
+    if res is None:
+        raise ValueError("ProDy could not parse PDB content (invalid or empty).")
+
+    out_stream = StringIO()
+    prody.writePDBStream(out_stream, res)
+    pocket_pdb_str = out_stream.getvalue()
+
+    protein_mol = Chem.MolFromPDBBlock(pocket_pdb_str, removeHs=False)
+    if protein_mol is None:
+        protein_mol = Chem.MolFromPDBBlock(
+            pocket_pdb_str, sanitize=False, removeHs=False
+        )
+        if protein_mol is None:
+            raise ValueError("RDKit could not parse pocket PDB block from ProDy.")
+        Chem.SanitizeMol(
+            protein_mol,
+            SanitizeFlags.SANITIZE_ALL ^ SanitizeFlags.SANITIZE_PROPERTIES,
+        )
+
+    return receptor_mol_to_pdbqt_str(protein_mol)
+
+
+_pdbqt_cache: Dict[str, str] = {}
+_pdbqt_cache_lock = threading.Lock()
+
+
+def pdb_to_pdbqt_cached(pdb_str: str) -> str:
+    """Like :func:`pdb_to_pdbqt` but caches results keyed by PDB content hash.
+
+    Thread-safe.  Useful when multiple molecules share the same receptor
+    across batches or parallel workers.
+    """
+    key = hashlib.sha256(pdb_str.encode("utf-8")).hexdigest()
+    with _pdbqt_cache_lock:
+        cached = _pdbqt_cache.get(key)
+    if cached is not None:
+        logger.debug("pdb_to_pdbqt cache hit (%s…)", key[:12])
+        return cached
+    result = pdb_to_pdbqt(pdb_str)
+    with _pdbqt_cache_lock:
+        _pdbqt_cache[key] = result
+    return result
+
+
+def build_anchor_points_smarts(seed_molecule: Chem.Mol, anchor_points: list) -> Optional[str]:
+    """Build a SMARTS pattern from the seed molecule atoms closest to each anchor point."""
+    if not anchor_points or seed_molecule is None:
+        return None
+    if seed_molecule.GetNumConformers() == 0:
+        logger.warning(
+            "AnchorPointsReward: seed_molecule has no conformer; cannot build 2D SMARTS from anchor points"
+        )
+        return None
+
+    coords = seed_molecule.GetConformer().GetPositions()
+    symbols = [a.GetSymbol() for a in seed_molecule.GetAtoms()]
+    matched_indices = []
+    for p in anchor_points:
+        p_name = p.get("name")
+        p_xyz = np.array([p["x"], p["y"], p["z"]], dtype=float)
+
+        best_idx = None
+        best_dist = None
+        for i, atom_xyz in enumerate(coords):
+            if p_name and symbols[i] != p_name:
+                continue
+            dist = np.linalg.norm(atom_xyz - p_xyz)
+            if best_dist is None or dist < best_dist:
+                best_idx = i
+                best_dist = dist
+        if best_idx is not None:
+            matched_indices.append(best_idx)
+
+    unique_indices = sorted(set(matched_indices))
+    if not unique_indices:
+        logger.warning("AnchorPointsReward: no anchor points map to seed_molecule atoms")
+        return None
+
+    try:
+        return Chem.MolFragmentToSmarts(seed_molecule, atomsToUse=unique_indices)
+    except Exception as exc:
+        logger.warning("AnchorPointsReward: failed to build SMARTS fragment: %s", exc)
+        return None
+
+
+def get_ligand_pharmacophore_points(ligand: Chem.Mol, radius: float = 0.5) -> List[Dict[str, Any]]:
+    """Extract pharmacophore feature points from a ligand molecule."""
+    code_to_name = {
+        "D": "HBDonor",
+        "A": "HBAcceptor",
+        "H": "Hydrophobic",
+        "P": "PositiveIonizable",
+        "N": "NegativeIonizable",
+        "a": "Aromatic",
+        "e": "Exclusion"
+    }
+    q = PH4(bin_step=radius*2.0)
+    q.load_from_mol(ligand)
+    feature_coords = q.get_feature_coords()
+    points = []
+    for feature_coord in feature_coords:
+        points.append({
+            'name': code_to_name[feature_coord[0]],
+            'x': feature_coord[1][0],
+            'y': feature_coord[1][1],
+            'z': feature_coord[1][2],
+            'radius': radius
+        })
+    return points
+
+
+def get_ligand_pli_points(mol: Chem.Mol, prot: Union[plf.Molecule, str]) -> List[Dict[str, str]]:
+    """Extract pocket-ligand interaction points using ProLIF fingerprints."""
+    PLI_INTERACTION_NAMES = [
+        'Hydrophobic', 'HBDonor', 'HBAcceptor', 'PiStacking', 'Anionic',
+        'Cationic', 'CationPi', 'PiCation', 'VdWContact'
+    ]
+    if isinstance(prot, str):
+        try:
+            prot = plf.Molecule(Chem.MolFromPDBBlock(prot, removeHs=False))
+        except Exception as exc:
+            logger.warning("Prolif Pfailed to parse PDB block: %s", exc)
+            return []
+    lig = plf.Molecule(mol)
+    fp = plf.Fingerprint()
+    try:
+        interactions = fp.generate(lig, prot)
+    except Exception:
+        logger.warning("Prolif Fingerprint failed to generate interactions: %s", exc)
+        interactions = {}
+    interaction_list = []
+    for point in interactions.keys():
+        for interaction in [PLI_INTERACTION_NAMES[i] for i in range(len(PLI_INTERACTION_NAMES)) if interactions[point][i]]:
+            interaction_list.append(
+                {
+                    "name": interaction,
+                    "residue": str(point[1]),
+                }
+            )
+    return interaction_list

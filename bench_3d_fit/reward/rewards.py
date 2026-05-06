@@ -285,7 +285,7 @@ class UniDockReward(RewardFunction):
 
     name = "unidock"
     SCORE_DESCRIPTIONS = {
-        "passed": "Unidock docking affinity the default threshold is -4 kcal/mol",
+        "passed": "Unidock docking affinity passed threshold",
         "score": "UniDock docking affinity in kcal/mol (more negative = stronger binding)",
     }
 

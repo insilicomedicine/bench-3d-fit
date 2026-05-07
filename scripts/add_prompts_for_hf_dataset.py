@@ -1,8 +1,9 @@
 """Add prompts to a parquet dataset by converting the generation conditions to prompts.
 Also stacks the datasets into a single parquet file for sharing on Hugging Face.
 
-This script is NOT part of the usual pipeline of using the benchmark, this was used
-to create the dataset for sharing on Hugging Face, included here for reference.
+This script is not intended to be part of the usual pipeline of using the benchmark, this
+was used to create the dataset for sharing on Hugging Face, (the data is in the test_data
+directory during the review period).
 """
 
 import argparse

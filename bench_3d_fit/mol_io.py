@@ -56,8 +56,11 @@ def mol_from_molblock_text(text: str) -> Chem.Mol:
 def mol_from_sdf_cell(value: Any) -> Optional[Chem.Mol]:
     """
     Lenient ligand from a table cell: missing/empty → None; tries first record,
-    then ``$$$$``-split records (annotation paths).
+    then ``$$$$``-split records (annotation paths). An existing ``Chem.Mol``
+    is returned unchanged.
     """
+    if isinstance(value, Chem.Mol):
+        return value
     text = coerce_parquet_cell_text(value)
     if text is None:
         return None

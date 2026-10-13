@@ -125,7 +125,11 @@ python scripts/sample_dataset_conditions.py \
 | `get_generation_conditions` | Load or sample `GenerationConditions` from a test-set row |
 | `sample_generation_conditions` | Sample `GenerationConditions` from an annotated parquet row at runtime |
 | `write_generation_results` | Write scored molecules to Parquet or CSV |
-| `write_success_stats` | Write aggregated pass rates and mean scores to JSON |
+| `get_success_stats` / `write_success_stats` | Aggregate pass rates and scores, including raw vs optimized-pose columns |
+
+`GenerationConditions.to_prompt` defaults to the `druglike_ro5` molecule conditions (Lipinski rule of five, 20–40 heavy atoms). Other variants are `base`, `druglike_nheavy_15`, `druglike_nheavy_25`, and `druglike_nheavy_seed`.
+
+`RewardScorer` defaults to `rescore_optimized_poses=True`. It scores the parsed pose (UniDock `--score_only`, columns without a prefix) and the UniDock locally optimized pose (columns prefixed with `opt_`).
 
 ## Built-in reward functions
 
@@ -133,13 +137,13 @@ Registered in `bench_3d_fit.reward.rewards`:
 
 | Name | Class | Scores |
 |------|-------|--------|
-| `posebusters` | `PoseBustersReward` | `intramolecular_passed`, `internal_energy_passed`, `intermolecular_passed` |
-| `unidock` | `UniDockReward` | `passed`, `score` (kcal/mol) |
+| `descriptors` | `DescriptorsReward` | heavy-atom count, MW, HBD, HBA, logP, TPSA, QED, rule-of-five pass flags |
+| `posebusters` | `PoseBustersReward` | `intramolecular_passed`, `intermolecular_passed` |
+| `unidock` | `UniDockReward` | `passed`, `score` (kcal/mol), `ROMol` |
 | `anchor_points` | `AnchorPointsReward` | `2d_passed`, `3d_passed`, `3d_atom_frac` |
 | `pharmacophore` | `PharmacophoreReward` | `passed`, `rms` |
-| `pli_points` | `PLIPointsReward` | `passed` |
-| `per_bond_mmff_energy` | `EnergyReward` | `score` (kcal/mol/bond) |
-| `ligand_similarity` | `LigandSimilarityReward` | `fp`, `shape`, `esp` |
+| `pocket_ligand_interaction` | `PLIPointsReward` | `passed` |
+| `ligand_similarity` | `LigandSimilarityReward` | `fp`, `shape`, `esp` and matching `*_passed` flags |
 
 ## Project layout
 
@@ -166,7 +170,8 @@ bench-3d-fit/
         ├── __init__.py              # Re-exports RewardScorer, RewardFunction, registry
         ├── base.py                  # RewardFunction ABC + registry (register_reward / get_reward_class)
         ├── scorer.py                # RewardScorer (molecule parsing + multi-reward runner)
-        ├── rewards.py               # All 7 built-in RewardFunction subclasses
+        ├── rewards.py               # Built-in RewardFunction subclasses
+        ├── aggregate.py             # Set-level joint success, diversity, uniqueness, novelty
         └── utils.py                 # PDB-to-PDBQT, pharmacophore, PLI helpers
 ```
 

@@ -8,6 +8,7 @@ from bench_3d_fit.reward.base import (
 from bench_3d_fit.reward.scorer import RewardScorer
 from bench_3d_fit.reward.rewards import (
     AnchorPointsReward,
+    DescriptorsReward,
     LigandSimilarityReward,
     PharmacophoreReward,
     PLIPointsReward,
@@ -27,6 +28,7 @@ __all__ = [
     "register_reward",
     "get_reward_class",
     "AnchorPointsReward",
+    "DescriptorsReward",
     "LigandSimilarityReward",
     "PharmacophoreReward",
     "PLIPointsReward",

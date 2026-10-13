@@ -71,6 +71,25 @@ def parse_args():
         required=True,
         help="Path to the directory where the scored molecules will be written.",
     )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default=None,
+        help=(
+            "Dataset name (crossdocked or plinder). Together with --condition, "
+            "writes joint success, diversity, uniqueness, and novelty."
+        ),
+    )
+    parser.add_argument(
+        "--condition",
+        type=str,
+        default=None,
+        help=(
+            "Condition token (all_conditions, pocket, pocket_fragment, "
+            "pocket_pharmacophore, or pocket_interaction). Together with "
+            "--dataset, writes the set-level aggregate scores."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -83,13 +102,21 @@ def main():
     for i in range(5):
         # Uses pre-sampled generation conditions from the test set unless sample=True
         generation_conditions = get_generation_conditions(df.iloc[i], sample=False)
+        print("Prompt:")
+        print(generation_conditions.to_prompt())
+        print("-" * 100)
         generations = generate_molecules(generation_conditions)
         scored = scorer(generations, generation_conditions, parallel=False)
         all_scored_list.append(scored)
 
     all_scored = pd.concat(all_scored_list, ignore_index=True)
+    write_success_stats(
+        all_scored,
+        Path(args.results_path) / "success_stats.json",
+        dataset=args.dataset,
+        condition=args.condition,
+    )
     write_generation_results(all_scored, Path(args.results_path) / "scored_molecules.parquet")
-    write_success_stats(all_scored, Path(args.results_path) / "success_stats.json")
 
 if __name__ == "__main__":
     main()

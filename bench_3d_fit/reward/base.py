@@ -30,14 +30,14 @@ logger = logging.getLogger(__name__)
 _REWARD_REGISTRY: Dict[str, Type[RewardFunction]] = {}
 
 
-def register_reward(name: str, cls: Type[RewardFunction]) -> None:
-    """Register a ``RewardFunction`` subclass by name.
+def register_reward(cls: Type[RewardFunction]) -> None:
+    """Register a ``RewardFunction`` subclass by its ``name`` attribute.
 
     Registered names can be passed to :class:`RewardScorer`
     (e.g. ``RewardScorer(["unidock", "posebusters"])``) or resolved
     individually via :func:`get_reward_class`.
     """
-    _REWARD_REGISTRY[name] = cls
+    _REWARD_REGISTRY[cls.name] = cls
 
 
 def get_reward_class(name: str) -> Type[RewardFunction]:

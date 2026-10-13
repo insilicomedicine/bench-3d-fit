@@ -72,16 +72,6 @@ modules:
       max_distance: double_bond_maximum_distance_from_plane
       flatness_passes: "Double bond flatness"
 
-  - name: "Energy ratio"
-    function: energy_ratio
-    parameters:
-      threshold_energy_ratio: 100.0
-      ensemble_number_conformations: 50
-    chosen_binary_test_output:
-      - energy_ratio_passes
-    rename_outputs:
-      energy_ratio_passes: "Internal energy"
-
   - name: "Distance to protein"
     function: "intermolecular_distance"
     parameters:

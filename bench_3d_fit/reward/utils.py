@@ -12,10 +12,12 @@ import logging
 import os
 import shutil
 import threading
+from collections import defaultdict
 from io import StringIO
 
 import numpy as np
-from typing import Any, Dict, List, Optional, Union
+from scipy.optimize import linear_sum_assignment
+from typing import Any, Dict, List, Optional, Tuple, Union
 from pmapper.pharmacophore import Pharmacophore as PH4
 
 import prody
@@ -147,30 +149,101 @@ def build_anchor_points_smarts(seed_molecule: Chem.Mol, anchor_points: list) -> 
         return None
 
 
+# pmapper feature codes. ``radius`` on a stored point is a Euclidean match
+# tolerance in Angstroms; it is not a pmapper ``bin_step``.
+_PH4_CODE_TO_NAME = {
+    "D": "HBDonor",
+    "A": "HBAcceptor",
+    "H": "Hydrophobic",
+    "P": "PositiveIonizable",
+    "N": "NegativeIonizable",
+    "a": "Aromatic",
+    "e": "Exclusion",
+}
+# Cost used for feature/point pairs outside the point radius so the
+# assignment prefers a feasible one-to-one match when one exists.
+_PH4_INFEASIBLE_COST = 1e12
+
+
 def get_ligand_pharmacophore_points(ligand: Chem.Mol, radius: float = 0.5) -> List[Dict[str, Any]]:
-    """Extract pharmacophore feature points from a ligand molecule."""
-    code_to_name = {
-        "D": "HBDonor",
-        "A": "HBAcceptor",
-        "H": "Hydrophobic",
-        "P": "PositiveIonizable",
-        "N": "NegativeIonizable",
-        "a": "Aromatic",
-        "e": "Exclusion"
-    }
-    q = PH4(bin_step=radius*2.0)
+    """Extract pharmacophore feature points from a ligand molecule.
+
+    ``radius`` is stored on each point as the spatial match tolerance (A).
+    It does not change which features are returned.
+    """
+    q = PH4()
     q.load_from_mol(ligand)
     feature_coords = q.get_feature_coords()
     points = []
     for feature_coord in feature_coords:
         points.append({
-            'name': code_to_name[feature_coord[0]],
+            'name': _PH4_CODE_TO_NAME[feature_coord[0]],
             'x': feature_coord[1][0],
             'y': feature_coord[1][1],
             'z': feature_coord[1][2],
             'radius': radius
         })
     return points
+
+
+def _pharmacophore_features_by_name(mol: Chem.Mol) -> Dict[str, np.ndarray]:
+    """Ligand feature centers in the pose frame, keyed by type name."""
+    q = PH4()
+    q.load_from_mol(mol)
+    grouped: Dict[str, List[Tuple[float, float, float]]] = defaultdict(list)
+    for code, xyz in q.get_feature_coords():
+        name = _PH4_CODE_TO_NAME.get(code)
+        if name is None:
+            continue
+        grouped[name].append(xyz)
+    return {name: np.asarray(coords, dtype=float) for name, coords in grouped.items()}
+
+
+def score_pharmacophore_points(
+    mol: Optional[Chem.Mol],
+    pharmacophore_points: Optional[List[Dict[str, Any]]],
+    default_radius: float = 0.5,
+) -> Tuple[Optional[bool], Optional[float]]:
+    """Match hypothesis points to ligand features in the pose coordinate frame.
+
+    Each point passes when a distinct feature of the same type lies within
+    that point's ``radius`` (A). No superposition is applied: a rigid
+    translation that moves features outside their radii fails. Returns
+    ``(passed, rms)``. ``rms`` is the unaligned RMSD of the minimum-cost
+    feasible assignment, and is ``None`` when the hypothesis does not match
+    or the molecule has no coordinates.
+    """
+    if mol is None or mol.GetNumConformers() == 0 or not pharmacophore_points:
+        return None, None
+
+    features = _pharmacophore_features_by_name(mol)
+    by_name: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for point in pharmacophore_points:
+        by_name[point["name"]].append(point)
+
+    chosen_sq: List[float] = []
+    for name, group in by_name.items():
+        coords = features.get(name)
+        if coords is None or len(coords) < len(group):
+            return False, None
+        targets = np.array(
+            [[p["x"], p["y"], p["z"]] for p in group], dtype=float
+        )
+        radii = np.array(
+            [float(p.get("radius", default_radius)) for p in group], dtype=float
+        )
+        dist = np.linalg.norm(targets[:, None, :] - coords[None, :, :], axis=2)
+        feasible = dist <= radii[:, None]
+        if not feasible.any(axis=1).all():
+            return False, None
+        cost = np.where(feasible, dist ** 2, _PH4_INFEASIBLE_COST)
+        rows, cols = linear_sum_assignment(cost)
+        picked = dist[rows, cols]
+        if np.any(picked > radii[rows]):
+            return False, None
+        chosen_sq.extend(float(d) ** 2 for d in picked)
+    rms = float(np.sqrt(np.mean(chosen_sq)))
+    return True, rms
 
 
 def get_ligand_pli_points(mol: Chem.Mol, prot: Union[plf.Molecule, str]) -> List[Dict[str, str]]:
@@ -189,7 +262,7 @@ def get_ligand_pli_points(mol: Chem.Mol, prot: Union[plf.Molecule, str]) -> List
     fp = plf.Fingerprint()
     try:
         interactions = fp.generate(lig, prot)
-    except Exception:
+    except Exception as exc:
         logger.warning("Prolif Fingerprint failed to generate interactions: %s", exc)
         interactions = {}
     interaction_list = []

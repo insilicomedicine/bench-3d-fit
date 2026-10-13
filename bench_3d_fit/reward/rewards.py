@@ -18,7 +18,7 @@ import os
 import subprocess
 import tempfile
 import traceback
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from pathlib import Path
 from yaml import safe_load
 
@@ -27,9 +27,16 @@ _SHM_DIR = "/dev/shm" if os.path.isdir("/dev/shm") else None
 import numpy as np
 import prolif as plf
 from rdkit import Chem, DataStructs
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, QED
+from rdkit.Chem.rdMolDescriptors import (
+    CalcExactMolWt,
+    CalcNumLipinskiHBD,
+    CalcNumLipinskiHBA,
+    CalcCrippenDescriptors,
+    CalcTPSA,
+    DoubleCubicLatticeVolume
+)
 from espsim import GetEspSim, GetShapeSim
-from pmapper.pharmacophore import Pharmacophore as PH4
 from posebusters import PoseBusters
 from unidock_tools.application.ligandprep import ligprep
 
@@ -40,8 +47,8 @@ from bench_3d_fit.reward.utils import (
     build_anchor_points_smarts,
 )
 from bench_3d_fit.reward.utils import (
-    get_ligand_pharmacophore_points,
     get_ligand_pli_points,
+    score_pharmacophore_points,
 )
 
 logger = logging.getLogger(__name__)
@@ -50,6 +57,71 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Core RewardFunction subclasses
 # ---------------------------------------------------------------------------
+class DescriptorsReward(RewardFunction):
+    """Descriptors Reward.
+    """
+    name = "descriptors"
+    SCORE_DESCRIPTIONS = {
+        "nheavy": "Number of Heavy Atoms",
+        "mw": "Molecular Weight",
+        "hbd": "Hydrogen Bond Donor",
+        "hba": "Hydrogen Bond Acceptor",
+        "logp": "LogP",
+        "tpsa": "Topological Polar Surface Area",
+        "qed": "Quantitative Estimate of Druglikeness",
+        "ro5_mw_passed": "Molecular Weight Passed",
+        "ro5_hbd_passed": "Hydrogen Bond Donor Passed",
+        "ro5_hba_passed": "Hydrogen Bond Acceptor Passed",
+        "ro5_logp_passed": "LogP Passed",
+        "ro5_passed": "All Rules of Five Passed",
+    }
+    def compute(self, mols, configuration):
+        output = {
+            "nheavy": [],
+            "vdw_volume": [],
+            "mw": [],
+            "hbd": [],
+            "hba": [],
+            "logp": [],
+            "tpsa": [],
+            "qed": [],
+            "ro5_mw_passed": [],
+            "ro5_hbd_passed": [],
+            "ro5_hba_passed": [],
+            "ro5_logp_passed": [],
+            "ro5_passed": [],
+        }
+        for mol in mols:
+            if mol is None:
+                for key in output.keys():
+                    output[key].append(None)
+                continue
+            nheavy = mol.GetNumHeavyAtoms()
+            volume_obj = DoubleCubicLatticeVolume(mol)
+            volume = volume_obj.GetVDWVolume()
+            mw = CalcExactMolWt(mol)
+            hbd = CalcNumLipinskiHBD(mol)
+            hba = CalcNumLipinskiHBA(mol)
+            logp = CalcCrippenDescriptors(mol)[0]
+            tpsa = CalcTPSA(mol)
+            output["nheavy"].append(nheavy)
+            output["vdw_volume"].append(volume)
+            output["mw"].append(mw)
+            output["hbd"].append(hbd)
+            output["hba"].append(hba)
+            output["logp"].append(logp)
+            output["tpsa"].append(tpsa)
+            output["qed"].append(QED.qed(mol))
+            output["ro5_mw_passed"].append(mw < 500)
+            output["ro5_hbd_passed"].append(hbd <= 5)
+            output["ro5_hba_passed"].append(hba <= 10)
+            output["ro5_logp_passed"].append(logp < 5)
+            output["ro5_passed"].append(
+                output["ro5_mw_passed"][-1] and output["ro5_hbd_passed"][-1] and \
+                    output["ro5_hba_passed"][-1] and output["ro5_logp_passed"][-1]
+            )
+        return output
+
 
 class PoseBustersReward(RewardFunction):
     """PoseBusters Reward.
@@ -63,7 +135,6 @@ class PoseBustersReward(RewardFunction):
 
     SCORE_DESCRIPTIONS = {
         "intramolecular_passed": "The conformation of the molecule is reasonable with respect to Bond Lengths, Bond Angles, Internal Steric Clash, Aromatic Ring Flatness, Non-Aromatic Ring Non-Flatness, Double Bond Flatness",
-        "internal_energy_passed": "The internal energy of the molecule is reasonable",
         "intermolecular_passed": "The molecule interacts with the protein in a reasonable way with respect to Protein-Ligand Maximum Distance, Minimum Distance to Protein, Volume Overlap with Protein",
     }
 
@@ -80,7 +151,6 @@ class PoseBustersReward(RewardFunction):
         pb_results["intermolecular_passed"] = pb_results[["protein-ligand_maximum_distance", "minimum_distance_to_protein", "volume_overlap_with_protein"]].all(axis=1)
         return {
             "intramolecular_passed": pb_results["intramolecular_passed"].tolist(),
-            "internal_energy_passed": pb_results["internal_energy"].tolist(),
             "intermolecular_passed": pb_results["intermolecular_passed"].tolist(),
         }
 
@@ -164,51 +234,30 @@ class AnchorPointsReward(RewardFunction):
 class PharmacophoreReward(RewardFunction):
     """Pharmacophore score.
 
-    Reads ``pharmacophore_points`` from ``configuration`` and builds the
-    PH4 object per call (accepted cost for small batches).
+    Reads ``pharmacophore_points`` from ``configuration``. A pose passes
+    when every point has a distinct ligand feature of the same type within
+    that point's ``radius`` (Angstroms), measured in the pose frame. The
+    match is not alignment-invariant: moving the conformer outside the
+    radii fails the filter.
     """
 
     name = "pharmacophore"
     SCORE_DESCRIPTIONS = {
-        "passed": "Whether the pharmacophore hypothesis matched the molecule (0 or 1)",
-        "rms": "RMSD between molecule pharmacophore features and the hypothesis",
+        "passed": "Whether every pharmacophore point has a same-type feature within its radius (0 or 1)",
+        "rms": "Unaligned RMSD (A) between matched feature centers and the pharmacophore points",
     }
-    NAME_TO_CODE = {
-        "HBDonor": "D",
-        "HBAcceptor": "A",
-        "Hydrophobic": "H",
-        "PositiveIonizable": "P",
-        "NegativeIonizable": "N",
-        "Aromatic": "a",
-        "Exclusion": "e"
-    }
+
     def compute(self, mols, configuration):
         if isinstance(configuration, list):
             return self._merge_per_mol_results(
                 [self.compute([m], c) for m, c in zip(mols, configuration)]
             )
         pharmacophore_points = configuration.pharmacophore_points
-        if pharmacophore_points is None:
-            p = None
-        else:
-            p = PH4(bin_step=pharmacophore_points[0]['radius']*2.0)
-            p.load_from_feature_coords([(self.NAME_TO_CODE[p['name']], (p['x'], p['y'], p['z'])) for p in pharmacophore_points])
-
         output = {"passed": [], "rms": []}
         for mol in mols:
-            q = PH4()
-            q.load_from_mol(mol)
-            if p is not None:
-                res = q.fit_model(p, get_rms=True)
-                if res is None:
-                    output["passed"].append(False)
-                    output["rms"].append(None)
-                else:
-                    output["passed"].append(True)
-                    output["rms"].append(res[1])
-            else:
-                output["passed"].append(None)
-                output["rms"].append(None)
+            passed, rms = score_pharmacophore_points(mol, pharmacophore_points)
+            output["passed"].append(passed)
+            output["rms"].append(rms)
         return output
 
 
@@ -285,8 +334,9 @@ class UniDockReward(RewardFunction):
 
     name = "unidock"
     SCORE_DESCRIPTIONS = {
-        "passed": "Unidock docking affinity passed threshold",
+        "passed": "Unidock docking affinity the default threshold is -4 kcal/mol",
         "score": "UniDock docking affinity in kcal/mol (more negative = stronger binding)",
+        "ROMol": "UniDock docking output molecule",
     }
 
     SEARCH_MODES = {
@@ -325,7 +375,7 @@ class UniDockReward(RewardFunction):
         mols: List[Chem.Mol],
         receptor_pdb: str,
         box_center,
-    ) -> List[Optional[float]]:
+    ) -> Tuple[List[Optional[float]], List[Optional[Chem.Mol]]]:
         """Run UniDock for *mols* sharing one receptor and one search box center."""
         if self.search_mode not in self.SEARCH_MODES:
             raise ValueError(
@@ -335,6 +385,7 @@ class UniDockReward(RewardFunction):
 
         exhaustiveness, max_step = self.SEARCH_MODES[self.search_mode]
         scores: List[Optional[float]] = [None] * len(mols)
+        output_mols: List[Optional[Chem.Mol]] = [None] * len(mols)
 
         valid_indices: List[int] = []
         prepared_mols: List[Chem.Mol] = []
@@ -348,7 +399,7 @@ class UniDockReward(RewardFunction):
                 continue
 
         if not valid_indices:
-            return scores
+            return scores, output_mols
 
         with tempfile.TemporaryDirectory(dir=_SHM_DIR) as temp_dir:
             pdbqt_str = pdb_to_pdbqt_cached(receptor_pdb)
@@ -412,6 +463,7 @@ class UniDockReward(RewardFunction):
                                     scores[orig_idx] = float(
                                         result_str.split()[1]
                                     )
+                                    output_mols[orig_idx] = out_mol
                         except Exception as exc:
                             logger.warning(
                                 "Failed to parse UniDock output for "
@@ -426,13 +478,14 @@ class UniDockReward(RewardFunction):
                     "stdout: %s\nstderr: %s",
                     ret.returncode, cmd, stdout, stderr,
                 )
-            return scores
+            return scores, output_mols
 
     def compute(self, mols, configuration):
         if isinstance(configuration, list):
             from concurrent.futures import ThreadPoolExecutor, as_completed
 
             scores = [None] * len(mols)
+            output_mols = [None] * len(mols)
             with ThreadPoolExecutor(max_workers=min(len(mols), 64)) as pool:
                 futures = {
                     pool.submit(self.compute, [m], c): i
@@ -441,28 +494,55 @@ class UniDockReward(RewardFunction):
                 for future in as_completed(futures):
                     idx = futures[future]
                     try:
-                        scores[idx] = future.result()["score"][0]
+                        results = future.result()
+                        scores[idx] = results["score"][0]
+                        output_mols[idx] = results["ROMol"][0]
                     except Exception:
                         logger.error(
                             "UniDockReward: parallel dock failed for mol %d:\n%s",
                             idx, traceback.format_exc(),
                         )
-            return {"passed": [s < self.passed_threshold if s else False for s in scores], "score": scores}
+            return {
+                "passed": [s < self.passed_threshold if s else False for s in scores],
+                "score": scores,
+                "ROMol": output_mols,
+            }
 
         environment_pdb = configuration.environment_pdb
         if environment_pdb is None:
             logger.warning("UniDockReward: no environment_pdb in configuration")
-            return {"passed": [None] * len(mols), "score": [None] * len(mols)}
+            return {
+                "passed": [None] * len(mols),
+                "score": [None] * len(mols),
+                "ROMol": [None] * len(mols),
+            }
 
         seed_mol = configuration.seed_molecule
-        if seed_mol is None or seed_mol.GetNumConformers() == 0:
-            box_center = mols[0].GetConformer().GetPositions().mean(axis=0)
-        else:
+        if seed_mol is not None and seed_mol.GetNumConformers() > 0:
             box_center = seed_mol.GetConformer().GetPositions().mean(axis=0)
-        scores = self._run_unidock(mols, environment_pdb, box_center)
+        else:
+            # Fall back to the first molecule that actually has a conformer;
+            # the batch may contain None / conformer-less entries.
+            ref_mol = next(
+                (m for m in mols if m is not None and m.GetNumConformers() > 0),
+                None,
+            )
+            if ref_mol is None:
+                logger.warning(
+                    "UniDockReward: no seed molecule and no candidate with a "
+                    "conformer to define the docking box center"
+                )
+                return {
+                    "passed": [None] * len(mols),
+                    "score": [None] * len(mols),
+                    "ROMol": [None] * len(mols),
+                }
+            box_center = ref_mol.GetConformer().GetPositions().mean(axis=0)
+        scores, output_mols = self._run_unidock(mols, environment_pdb, box_center)
         return {
             "passed": [s < self.passed_threshold if s else False for s in scores],
             "score": scores,
+            "ROMol": output_mols,
         }
 
 
@@ -480,10 +560,10 @@ class EnergyReward(RewardFunction):
             try:
                 props = AllChem.MMFFGetMoleculeProperties(m)
                 ff = AllChem.MMFFGetMoleculeForceField(m, props)
-                energy = ff.CalcEnergy() if ff else 1e10
+                energy = ff.CalcEnergy() if ff else None
                 energy_results.append(energy)
             except Exception:
-                energy_results.append(1e10)
+                energy_results.append(None)
 
         energies = np.array(energy_results)
         num_bonds = np.array([m.GetNumBonds() for m in mols])
@@ -501,10 +581,14 @@ class LigandSimilarityReward(RewardFunction):
     """
 
     name = "ligand_similarity"
+    pass_threshold = 0.3
     SCORE_DESCRIPTIONS = {
         "fp": "Morgan fingerprint Tanimoto similarity to the reference ligand molecule (0 to 1)",
+        "fp_passed": "Morgan fingerprint Tanimoto similarity is at least 0.3",
         "shape": "Shape (volume overlap) similarity to the reference ligand molecule (0 to 1)",
+        "shape_passed": "Shape similarity is at least 0.3",
         "esp": "Electrostatic potential similarity to the reference ligand molecule (-1 to 1)",
+        "esp_passed": "Electrostatic potential similarity is at least 0.3",
     }
     def __init__(
         self,
@@ -513,6 +597,15 @@ class LigandSimilarityReward(RewardFunction):
         super().__init__(**kwargs)
         self.fp_generator = AllChem.GetMorganGenerator(radius=2)
 
+    def _passed(self, values):
+        return [
+            None if value is None else value >= self.pass_threshold
+            for value in values
+        ]
+
+    def _empty_result(self, n):
+        return {key: [None] * n for key in self.SCORE_DESCRIPTIONS}
+
     def compute(self, mols, configuration):
         if isinstance(configuration, list):
             return self._merge_per_mol_results(
@@ -520,11 +613,7 @@ class LigandSimilarityReward(RewardFunction):
             )
         reference_mol = configuration.seed_molecule
         if reference_mol is None:
-            return {
-                "fp": [None] * len(mols),
-                "shape": [None] * len(mols),
-                "esp": [None] * len(mols),
-            }
+            return self._empty_result(len(mols))
 
         sim_fp = []
         sim_shape = []
@@ -555,17 +644,20 @@ class LigandSimilarityReward(RewardFunction):
 
         return {
             "fp": sim_fp,
+            "fp_passed": self._passed(sim_fp),
             "shape": sim_shape,
+            "shape_passed": self._passed(sim_shape),
             "esp": sim_esp,
+            "esp_passed": self._passed(sim_esp),
         }
 
 # ---------------------------------------------------------------------------
 # Auto-register build-in reward functions
 # ---------------------------------------------------------------------------
-register_reward("posebusters", PoseBustersReward)
-register_reward("unidock", UniDockReward)
-register_reward("anchor_points", AnchorPointsReward)
-register_reward("pharmacophore", PharmacophoreReward)
-register_reward("pli_points", PLIPointsReward)
-register_reward("per_bond_mmff_energy", EnergyReward)
-register_reward("ligand_similarity", LigandSimilarityReward)
+register_reward(DescriptorsReward)
+register_reward(PoseBustersReward)
+register_reward(UniDockReward)
+register_reward(AnchorPointsReward)
+register_reward(PharmacophoreReward)
+register_reward(PLIPointsReward)
+register_reward(LigandSimilarityReward)

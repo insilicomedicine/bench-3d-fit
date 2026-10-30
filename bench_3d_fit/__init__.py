@@ -5,7 +5,7 @@ molecules (as RDKit ``Mol`` objects or formatted strings) and receive scored
 DataFrames and aggregated metrics for evaluation.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 try:
     from prody import confProDy

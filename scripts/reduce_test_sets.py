@@ -1,11 +1,12 @@
-"""Write reduced CrossDocked and PLINDER v2 test sets.
+"""Cluster CrossDocked and PLINDER test sets in place.
 
 Keeps the first row for each heavy-atom canonical SMILES, then the first
 remaining row for each exact receptor sequence. The remaining rows are
 clustered by longest-chain sequence identity, and each cluster keeps its
 first row in dataset order. Condition columns stay on the kept rows. A
-sidecar JSON lists the 0-based positions of those rows in the original v2
-parquet. The source parquets are not modified.
+sidecar JSON lists the 0-based positions of those rows in the input parquet.
+Each source parquet is atomically replaced with its clustered result.
+Paths default to the checked-in ``data/test_sets/{dataset}.parquet`` files.
 """
 
 from __future__ import annotations
@@ -20,10 +21,13 @@ from Bio.Align import PairwiseAligner
 from rdkit import Chem
 
 from bench_3d_fit.mol_io import mol_from_sdf_cell
-from bench_3d_fit.reward.aggregate import DEFAULT_REFERENCE_ROOT
+from bench_3d_fit.reward.aggregate import (
+    DEFAULT_TEST_DATA_ROOT,
+    TEST_DATA_ROOT_ENV,
+)
 
 DATASETS = ("crossdocked", "plinder")
-V2_TEST_PARQUET = "genchembench_{dataset}/v2/test.parquet"
+TEST_PARQUET_TEMPLATE = "{dataset}.parquet"
 # Global identity on the longest chain. Below this, a row starts a new cluster.
 SEQUENCE_IDENTITY = 0.50
 
@@ -60,10 +64,16 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument(
+        "--test-data-root",
         "--reference-root",
+        dest="test_data_root",
         type=Path,
-        default=DEFAULT_REFERENCE_ROOT,
-        help="Directory containing genchembench_{dataset}/v2/test.parquet.",
+        default=DEFAULT_TEST_DATA_ROOT,
+        help=(
+            "Directory containing crossdocked.parquet and plinder.parquet. "
+            f"Defaults to ${TEST_DATA_ROOT_ENV} when set, otherwise "
+            "data/test_sets/."
+        ),
     )
     parser.add_argument(
         "--datasets",
@@ -71,15 +81,6 @@ def parse_args() -> argparse.Namespace:
         default=list(DATASETS),
         choices=DATASETS,
         help="Datasets to reduce. Defaults to crossdocked and plinder.",
-    )
-    parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=None,
-        help=(
-            "Root for reduced parquets. Defaults to --reference-root, "
-            "writing genchembench_{dataset}/reduced/test.parquet."
-        ),
     )
     return parser.parse_args()
 
@@ -202,15 +203,11 @@ def first_occurrence_mask(keys: Sequence[Optional[str]]) -> list[bool]:
     return keep
 
 
-def source_path(reference_root: Path, dataset: str) -> Path:
-    path = reference_root / V2_TEST_PARQUET.format(dataset=dataset)
-    if path.parent.name != "v2":
-        raise ValueError(f"Refusing to read a non-v2 test set: {path}")
+def source_path(test_data_root: Path, dataset: str) -> Path:
+    path = test_data_root / TEST_PARQUET_TEMPLATE.format(dataset=dataset)
+    if path.name != f"{dataset}.parquet":
+        raise ValueError(f"Unexpected test-set path: {path}")
     return path
-
-
-def output_path(output_root: Path, dataset: str) -> Path:
-    return output_root / f"genchembench_{dataset}" / "reduced" / "test.parquet"
 
 
 def index_path(parquet_path: Path) -> Path:
@@ -222,7 +219,7 @@ def apply_keep_mask(
     source_positions: list[int],
     keep: Sequence[bool],
 ) -> tuple[pd.DataFrame, list[int]]:
-    """Return kept rows and their positions in the original v2 parquet."""
+    """Return kept rows and their positions in the input parquet."""
     if len(frame) != len(source_positions) or len(frame) != len(keep):
         raise ValueError(
             "Row mask, frame, and source positions must have the same length."
@@ -233,13 +230,10 @@ def apply_keep_mask(
     return kept_frame, kept_positions
 
 
-def reduce_dataset(reference_root: Path, output_root: Path, dataset: str) -> None:
-    src = source_path(reference_root, dataset)
-    dest = output_path(output_root, dataset)
+def reduce_dataset(test_data_root: Path, dataset: str) -> None:
+    src = source_path(test_data_root, dataset)
     if not src.is_file():
         raise FileNotFoundError(f"Test set not found: {src}")
-    if src.resolve() == dest.resolve():
-        raise ValueError(f"Refusing to overwrite the source test set: {src}")
 
     df = pd.read_parquet(src)
     for column in ("sdf", "pdb", "anchor_points", "pharmacophore_points", "pli_points"):
@@ -271,21 +265,30 @@ def reduce_dataset(reference_root: Path, output_root: Path, dataset: str) -> Non
         after_sequence, source_positions, cluster_keep
     )
 
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    reduced.to_parquet(dest, index=False)
-    indices_dest = index_path(dest)
-    indices_dest.write_text(
-        json.dumps(
-            {
-                "dataset": dataset,
-                "source": str(src),
-                "n_source_rows": n_start,
-                "kept_source_indices": kept_indices,
-            },
-            indent=2,
+    indices_dest = index_path(src)
+    parquet_tmp = src.with_name(f".{src.name}.tmp")
+    indices_tmp = indices_dest.with_name(f".{indices_dest.name}.tmp")
+    try:
+        parquet_tmp.unlink(missing_ok=True)
+        indices_tmp.unlink(missing_ok=True)
+        reduced.to_parquet(parquet_tmp, index=False)
+        indices_tmp.write_text(
+            json.dumps(
+                {
+                    "dataset": dataset,
+                    "source": str(src),
+                    "n_source_rows": n_start,
+                    "kept_source_indices": kept_indices,
+                },
+                indent=2,
+            )
+            + "\n"
         )
-        + "\n"
-    )
+        parquet_tmp.replace(src)
+        indices_tmp.replace(indices_dest)
+    finally:
+        parquet_tmp.unlink(missing_ok=True)
+        indices_tmp.unlink(missing_ok=True)
 
     print(
         f"{dataset}: read {src} ({n_start} rows), "
@@ -294,15 +297,14 @@ def reduce_dataset(reference_root: Path, output_root: Path, dataset: str) -> Non
         f"{len(set(labels))} sequence clusters at {SEQUENCE_IDENTITY:.0%} identity, "
         f"kept one representative {len(reduced)} dropped {n_after_sequence - len(reduced)}"
     )
-    print(f"  wrote {dest}")
+    print(f"  overwrote {src}")
     print(f"  wrote {indices_dest} ({len(kept_indices)} source indices)")
 
 
 def main() -> None:
     args = parse_args()
-    output_root = args.reference_root if args.output_root is None else args.output_root
     for dataset in args.datasets:
-        reduce_dataset(args.reference_root, output_root, dataset)
+        reduce_dataset(args.test_data_root, dataset)
 
 
 if __name__ == "__main__":

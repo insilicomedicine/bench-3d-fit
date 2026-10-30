@@ -130,8 +130,10 @@ def get_success_stats(
     (using ``condition``), Morgan diversity, uniqueness, and novelty against
     the dataset reference split. Those scores need the full frame and are not
     means of per-molecule reward columns. Set ``aggregate_scores`` to false to
-    skip them when they are not needed. ``reference_root`` overrides the
-    directory that holds ``genchembench_{dataset}/v2/test.parquet``.
+    skip them when they are not needed. Novelty uses
+    ``data/novelty_reference/{dataset}_unique.txt`` from the repository by
+    default. ``reference_root`` or ``BENCH_3D_FIT_REFERENCE_ROOT`` can
+    override that directory.
 
     Returns a dictionary with the success rates (all outputs) and other scores (valid inputs only).
     """
@@ -197,7 +199,9 @@ def write_success_stats(
     ``dataset``, ``condition``, and ``aggregate_scores`` are forwarded to
     :func:`get_success_stats`. Joint success, diversity, uniqueness, and
     novelty are included when both dataset and condition are set and
-    ``aggregate_scores`` is true.
+    ``aggregate_scores`` is true. Novelty uses the bundled paper reference
+    SMILES by default; ``reference_root`` or
+    ``BENCH_3D_FIT_REFERENCE_ROOT`` can override their directory.
 
     Returns the scores dictionary.
     """

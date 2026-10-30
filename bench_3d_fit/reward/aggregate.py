@@ -4,13 +4,13 @@ Set-level scores that cannot be reduced from per-molecule reward columns.
 These run once on a fully scored frame, after
 :class:`~bench_3d_fit.reward.scorer.RewardScorer`. They need context the
 per-molecule scorer does not have: the condition token for the task, the
-dataset name, and (for novelty) the train+test reference SMILES.
+dataset name, and (for novelty) the paper's reference SMILES.
 
 * ``joint_conditions_passed`` / ``opt_joint_conditions_passed`` — mean of a
   row-wise AND over the pass columns that belong to the condition token.
 * ``diversity`` — ``1 - mean pairwise Morgan Tanimoto`` over valid molecules.
 * ``uniqueness`` — unique heavy-atom canonical SMILES divided by valid molecules.
-* ``novelty`` — fraction of valid molecules absent from the train+test reference.
+* ``novelty`` — fraction of valid molecules absent from the paper reference.
 
 Diversity and uniqueness are not valid on a single prompt group: duplicates
 and pairwise similarities do not average across batches. Novelty's denominator
@@ -20,7 +20,9 @@ is valid molecules only, so it is not a ``*_passed`` column.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import sys
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
@@ -43,21 +45,27 @@ _DIVERSITY_FP_GENERATOR = AllChem.GetMorganGenerator(
     fpSize=_DIVERSITY_FP_SIZE,
 )
 
-# Default location of ``genchembench_{dataset}/v2/test.parquet``. Callers can
-# override this per computation; it is not fixed inside the loaders.
-DEFAULT_REFERENCE_ROOT = Path(
-    "/mnt/custom-file-systems/efs/fs-05a219e38ecb2cb6f/data"
+# Paper data bundled with the repository.
+TEST_DATA_ROOT_ENV = "BENCH_3D_FIT_TEST_DATA_ROOT"
+REFERENCE_ROOT_ENV = "BENCH_3D_FIT_REFERENCE_ROOT"
+_test_data_root_env = os.environ.get(TEST_DATA_ROOT_ENV)
+_reference_root_env = os.environ.get(REFERENCE_ROOT_ENV)
+_source_or_target_data = Path(__file__).resolve().parents[2] / "data"
+_installed_data = Path(sys.prefix) / "data"
+DEFAULT_DATA_ROOT = (
+    _source_or_target_data if _source_or_target_data.is_dir() else _installed_data
 )
-TEST_PARQUET_TEMPLATE = "genchembench_{dataset}/v2/test.parquet"
-
-# Train+test unique heavy-atom canonical SMILES, one per line.
-# ``reference_root`` stays the full v2 test parquet root; these lists live
-# with the reduced test data.
-UNIQUE_SMILES_ROOT = Path(
-    "/mnt/custom-file-systems/efs/fs-05a219e38ecb2cb6f/t.macdougall/dev/"
-    "experiments/2026_10_genchem/3dfit_resubmission/reduced_v2_test_data"
+DEFAULT_TEST_DATA_ROOT = (
+    Path(_test_data_root_env).expanduser()
+    if _test_data_root_env
+    else DEFAULT_DATA_ROOT / "test_sets"
 )
-UNIQUE_SMILES_TEMPLATE = "genchembench_{dataset}/v2/{dataset}_unique.txt"
+DEFAULT_REFERENCE_ROOT = (
+    Path(_reference_root_env).expanduser()
+    if _reference_root_env
+    else DEFAULT_DATA_ROOT / "novelty_reference"
+)
+REFERENCE_SMILES_TEMPLATE = "{dataset}_unique.txt"
 
 TASK_NAME_PATTERN = re.compile(
     r"(mini_test|crossdocked|plinder)_"
@@ -249,19 +257,33 @@ def add_diversity(
     return {"diversity": diversity}
 
 
+def _resolve_reference_root(
+    reference_root: Optional[Union[str, Path]],
+) -> Path:
+    """Resolve reference data from an argument or environment variable."""
+    if reference_root is not None:
+        return Path(reference_root).expanduser()
+
+    env_value = os.environ.get(REFERENCE_ROOT_ENV)
+    if env_value:
+        return Path(env_value).expanduser()
+
+    return DEFAULT_REFERENCE_ROOT
+
+
 @lru_cache(maxsize=4)
-def _load_reference_smiles(dataset: str) -> Set[str]:
-    """Load train+test canonical SMILES for one dataset."""
+def _load_reference_smiles(dataset: str, reference_root: Path) -> Set[str]:
+    """Load the canonical ligand SMILES used for paper novelty scoring."""
     if dataset not in ("crossdocked", "plinder"):
         raise ValueError(
             f"Novelty requires dataset 'crossdocked' or 'plinder'; got {dataset!r}."
         )
-    path = UNIQUE_SMILES_ROOT / UNIQUE_SMILES_TEMPLATE.format(dataset=dataset)
+    path = reference_root / REFERENCE_SMILES_TEMPLATE.format(dataset=dataset)
     if not path.is_file():
-        raise FileNotFoundError(f"Reference SMILES file not found: {path}")
+        raise FileNotFoundError(f"Novelty reference file not found: {path}")
 
-    smiles = {line for line in path.read_text().splitlines() if line}
-    logger.info("Loaded %d reference SMILES from %s", len(smiles), path)
+    smiles = {line.strip() for line in path.read_text().splitlines() if line.strip()}
+    logger.info("Loaded %d novelty reference SMILES from %s", len(smiles), path)
     return smiles
 
 
@@ -273,15 +295,17 @@ def add_novelty(
     reference_root: Optional[Union[str, Path]] = None,
 ) -> Dict[str, float]:
     """
-    Fraction of valid generated molecules absent from the train+test reference.
+    Fraction of valid generated molecules absent from the paper reference.
 
-    Reference SMILES are the heavy-atom canonical SMILES in
-    ``genchembench_{dataset}/v2/{dataset}_unique.txt`` under
-    :data:`UNIQUE_SMILES_ROOT`. The denominator is valid molecules only.
+    Reference SMILES are read from ``{dataset}_unique.txt`` in
+    ``reference_root``. By default this is the repository's
+    ``data/novelty_reference`` directory; :data:`REFERENCE_ROOT_ENV` can
+    override it. The denominator is valid molecules only.
     """
-    del condition, reference_root
+    del condition
     smiles = _valid_canonical_smiles(df, "novelty")
-    reference = _load_reference_smiles(dataset)
+    root = _resolve_reference_root(reference_root)
+    reference = _load_reference_smiles(dataset, root)
     n_valid = len(smiles)
     n_novel = sum(smi not in reference for smi in smiles)
     novelty = _rate(n_novel, n_valid)
@@ -340,8 +364,9 @@ def compute_aggregate_scores(
     Compute set-level scores for one scored experiment frame.
 
     ``scores`` selects adder names (default: all of
-    :data:`AGGREGATE_SCORE_NAMES`). Novelty reads train+test SMILES from
-    :data:`UNIQUE_SMILES_ROOT` and does not use ``reference_root``.
+    :data:`AGGREGATE_SCORE_NAMES`). Novelty reads the paper reference SMILES
+    below ``reference_root``, the :data:`REFERENCE_ROOT_ENV` directory, or the
+    repository's bundled ``data/novelty_reference`` directory.
     """
     adder_names = list(AGGREGATE_SCORE_NAMES if scores is None else scores)
     unknown = [name for name in adder_names if name not in SCORE_ADDERS]

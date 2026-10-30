@@ -3,6 +3,7 @@
                 Functions for Processing Raw Data From Source
 Applied to CrossDocked2020 and PLInder datasets, but kept as general as possible
 to be applied to other datasets as desired.
+Processed output defaults to ``data/test_sets/{dataset}.parquet``.
 ---------------------------------------------------------------------------------------
 """
 import argparse
@@ -38,7 +39,7 @@ So, to run this script, you need to:
 1. Download the CrossDocked 2020 dataset from the provided link.
 2. Unzip the dataset to the directory of your choice.
 3. Run the script with the following command:
-python process_raw_data.py --dataset crossdocked --output-dir /path/to/output/directory
+python process_raw_data.py --dataset crossdocked
     --input-dir /path/to/input/directory --split-file /path/to/split/file
 ---------------------------------------------------------------------------------------
 """
@@ -96,7 +97,7 @@ So, to run this script, you need to:
 1. Download the PLInder dataset from the provided link.
 2. Unzip all of the zipped system files into the input directory.
 3. Run the script with the following command:
-python process_raw_data.py --dataset plinder --output-dir /path/to/output/directory
+python process_raw_data.py --dataset plinder
     --input-dir /path/to/input/directory --split-file /path/to/split/file
 ---------------------------------------------------------------------------------------
 """
@@ -145,6 +146,11 @@ Shared Functionality between CrossDocked and PLInder datasets.
 ---------------------------------------------------------------------------------------
 """
 
+DEFAULT_TEST_DATA_ROOT = (
+    Path(__file__).resolve().parents[1] / "data" / "test_sets"
+)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
@@ -162,9 +168,12 @@ def parse_args():
     )
     parser.add_argument(
         "--output-dir",
-        type=str,
-        required=True,
-        help="Directory where the processed parquet file will be written.",
+        type=Path,
+        default=DEFAULT_TEST_DATA_ROOT,
+        help=(
+            "Directory where {dataset}.parquet will be written. "
+            "Defaults to the repository's data/test_sets directory."
+        ),
     )
     parser.add_argument(
         "--input-dir",
@@ -259,8 +268,8 @@ def main():
     print(f"Rejected count: {rejected_count}")
     print(f"Total complexes: {len(df)}")
     output_dir = Path(args.output_dir)
-    (output_dir / args.dataset).mkdir(parents=True, exist_ok=True)
-    df.to_parquet(output_dir / args.dataset / "test.parquet")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(output_dir / f"{args.dataset}.parquet")
 
 if __name__ == "__main__":
     main()

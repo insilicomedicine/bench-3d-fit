@@ -1,5 +1,5 @@
 # 3D-Fit Benchmark
-Benchmarking Code for: Do Language Models Dream of Binding Molecules? Benchmarking LLMs under Spatial Constraints
+The Benchmark for 3D Molecular Design: Do Language Models Dream of Binding Molecules? Benchmarking LLMs under Spatial Constraints
 
 Scoring and evaluation framework for 3D **generative chemistry** models with 3D conditions.  Your generator stays outside the package — you pass in RDKit molecules (or LLM completion strings according to the included prompts) and get back scored DataFrames for your molecules (Parquet / CSV) plus aggregated metrics.
 
@@ -18,7 +18,7 @@ from bench_3d_fit import (
     write_success_stats,
 )
 
-df = pd.read_parquet("test.parquet")
+df = pd.read_parquet("data/test_sets/crossdocked.parquet")
 scorer = RewardScorer()          # uses all registered reward functions
 all_scored = []
 
@@ -90,18 +90,28 @@ ln -s "$(micromamba run -n unidock which unidock)" /usr/local/bin/unidock
 
 You can also set the `UNIDOCK_BIN` environment variable to the full path of the binary.
 
-## Dataset preparation
+## Paper test datasets
+
+The exact test sets used for the paper are versioned in this repository:
+
+- `data/test_sets/crossdocked.parquet`
+- `data/test_sets/plinder.parquet`
+
+Both files already contain the sampled anchor-point, pharmacophore, and
+pocket-ligand-interaction conditions used for the reported results. The scripts
+below reproduce the preparation pipeline and default to these files.
 
 ### 1. Process raw data
 
-Convert CrossDocked2020 or PLInder raw files into a cleaned parquet:
+Convert CrossDocked2020 or PLInder raw files into a cleaned parquet. Unless
+`--output-dir` is supplied, this writes
+`data/test_sets/{dataset}.parquet`.
 
 ```bash
 python scripts/process_raw_data.py \
     --dataset crossdocked \
     --input-dir /path/to/crossdocked/ \
-    --split-file /path/to/test0.types \
-    --output-dir /path/to/output/
+    --split-file /path/to/test0.types
 ```
 
 ### 2. Pre-sample generation conditions
@@ -110,9 +120,43 @@ Augment the parquet with sampled anchor points, pharmacophore points, and pocket
 
 ```bash
 python scripts/sample_dataset_conditions.py \
-    --input-file /path/to/test.parquet \
-    --output-file /path/to/test_with_conditions.parquet
+    --dataset crossdocked \
+    --overwrite
 ```
+
+### 3. Reduce and cluster the test sets
+
+`scripts/reduce_test_sets.py` implements the test-set receptor clustering
+described in the preprint. For each dataset, it removes repeated ligands and
+exact receptor sequences, clusters the remaining receptors at 50% global
+sequence identity using their longest chain, and retains the first
+representative from each cluster.
+
+```bash
+python scripts/reduce_test_sets.py \
+    --datasets crossdocked plinder
+```
+
+By default the script replaces `data/test_sets/crossdocked.parquet` and
+`data/test_sets/plinder.parquet` in place with their clustered test sets and
+writes `kept_source_indices.json` beside each processed file. The checked-in
+files are already clustered and are the benchmark's canonical test sets;
+there is no separate full-versus-reduced dataset distinction.
+
+### 4. Aggregate-score references
+
+Novelty scoring uses the exact paper reference SMILES in
+`data/novelty_reference/{dataset}_unique.txt`. To use another copy of these
+files, pass their directory to
+`write_success_stats(..., reference_root=...)` or set:
+
+```bash
+export BENCH_3D_FIT_REFERENCE_ROOT=/path/to/novelty-reference
+```
+
+The end-to-end example exposes the same novelty override as
+`--reference-root`. Test-set scripts separately accept `--test-data-root` or
+the `BENCH_3D_FIT_TEST_DATA_ROOT` environment variable.
 
 ## Key components
 
@@ -152,11 +196,21 @@ bench-3d-fit/
 ├── README.md
 ├── LICENSE
 ├── pyproject.toml
-├── configs/
-│   └── posebusters.yml              # PoseBusters configuration
+├── data/
+│   ├── README.md                    # Data provenance and usage
+│   ├── test_sets/
+│   │   ├── README.md
+│   │   ├── crossdocked.parquet      # Exact CrossDocked paper test set
+│   │   └── plinder.parquet          # Exact PLINDER paper test set
+│   └── novelty_reference/
+│       ├── README.md
+│       ├── crossdocked_unique.txt   # Paper novelty reference
+│       └── plinder_unique.txt       # Paper novelty reference
 ├── scripts/
 │   ├── process_raw_data.py          # Process CrossDocked2020 / PLInder raw data
-│   └── sample_dataset_conditions.py # Pre-sample conditions for a parquet test set
+│   ├── sample_dataset_conditions.py # Pre-sample conditions for a parquet test set
+│   ├── reduce_test_sets.py          # Reduce repeated ligands/receptors
+│   └── add_prompts_for_hf_dataset.py # Add paper prompts to released datasets
 ├── examples/
 │   └── usage.py                     # End-to-end scoring example
 └── bench_3d_fit/
@@ -166,6 +220,8 @@ bench-3d-fit/
     ├── mol_io.py                    # Molecule I/O (parsing, reconstruction, validation, coords)
     ├── prompt.py                    # LLM prompt construction (format_environment_pdb, etc.)
     ├── sampling.py                  # sample_generation_conditions + BRICS fragment helpers
+    ├── configs/
+    │   └── posebusters.yml          # Packaged PoseBusters configuration
     └── reward/
         ├── __init__.py              # Re-exports RewardScorer, RewardFunction, registry
         ├── base.py                  # RewardFunction ABC + registry (register_reward / get_reward_class)

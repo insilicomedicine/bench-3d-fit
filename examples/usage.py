@@ -21,6 +21,10 @@ from bench_3d_fit import (
     write_success_stats,
 )
 
+DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[1] / "data"
+DEFAULT_TEST_DATA_ROOT = DEFAULT_DATA_ROOT / "test_sets"
+DEFAULT_REFERENCE_ROOT = DEFAULT_DATA_ROOT / "novelty_reference"
+
 
 def generate_molecules(generation_conditions: GenerationConditions) -> list[Chem.Mol]:
     """
@@ -35,7 +39,7 @@ def generate_molecules(generation_conditions: GenerationConditions) -> list[Chem
     generations = your_model(generation_conditions.to_prompt())
     
     and then pass the completions to the RewardScorer, which can parse the completions
-    if the format instructions were followed by the modeland score the molecules.
+    if the format instructions were followed by the model and score the molecules.
 
     - For a diffusion model that supports pocket and anchor point conditioning,
     can do something like:
@@ -54,16 +58,19 @@ def generate_molecules(generation_conditions: GenerationConditions) -> list[Chem
 def parse_args():
     parser = argparse.ArgumentParser(
         description=(
-            "Example usage of the 3D-Fit Benchmark library to score generated molecules."
-            "The placeholder `generate_molecules` function is used to generate molecules based on the generation conditions."
-            "in the example, the function returns a list of 2 copies of the seed molecule from the generation conditions."
+            "Example usage of the 3D-Fit Benchmark library to score generated "
+            "molecules. The placeholder `generate_molecules` function generates "
+            "two copies of the seed molecule from the generation conditions."
         )
     )
     parser.add_argument(
         "--dataset-path",
-        type=str,
-        required=True,
-        help="Path to the test set parquet file.",
+        type=Path,
+        default=None,
+        help=(
+            "Path to the test-set parquet. Defaults to "
+            "data/test_sets/{dataset}.parquet."
+        ),
     )
     parser.add_argument(
         "--results-path",
@@ -74,20 +81,31 @@ def parse_args():
     parser.add_argument(
         "--dataset",
         type=str,
-        default=None,
+        choices=["crossdocked", "plinder"],
+        default="crossdocked",
         help=(
-            "Dataset name (crossdocked or plinder). Together with --condition, "
+            "Dataset name. Defaults to crossdocked. Together with --condition, "
             "writes joint success, diversity, uniqueness, and novelty."
         ),
     )
     parser.add_argument(
         "--condition",
         type=str,
-        default=None,
+        default="all_conditions",
         help=(
             "Condition token (all_conditions, pocket, pocket_fragment, "
-            "pocket_pharmacophore, or pocket_interaction). Together with "
-            "--dataset, writes the set-level aggregate scores."
+            "pocket_pharmacophore, or pocket_interaction). Defaults to "
+            "all_conditions and writes the set-level aggregate scores."
+        ),
+    )
+    parser.add_argument(
+        "--reference-root",
+        type=Path,
+        default=DEFAULT_REFERENCE_ROOT,
+        help=(
+            "Directory containing crossdocked_unique.txt and "
+            "plinder_unique.txt for novelty scoring. Defaults to "
+            "data/novelty_reference/."
         ),
     )
     return parser.parse_args()
@@ -95,7 +113,12 @@ def parse_args():
 
 def main():
     args = parse_args()
-    df = pd.read_parquet(args.dataset_path)
+    dataset_path = (
+        DEFAULT_TEST_DATA_ROOT / f"{args.dataset}.parquet"
+        if args.dataset_path is None
+        else args.dataset_path
+    )
+    df = pd.read_parquet(dataset_path)
 
     scorer = RewardScorer()
     all_scored_list: list[pd.DataFrame] = []
@@ -115,6 +138,7 @@ def main():
         Path(args.results_path) / "success_stats.json",
         dataset=args.dataset,
         condition=args.condition,
+        reference_root=args.reference_root,
     )
     write_generation_results(all_scored, Path(args.results_path) / "scored_molecules.parquet")
 

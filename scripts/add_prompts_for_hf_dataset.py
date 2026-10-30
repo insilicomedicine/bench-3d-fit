@@ -2,8 +2,9 @@
 Also stacks the datasets into a single parquet file for sharing on Hugging Face.
 
 This script is not intended to be part of the usual pipeline of using the benchmark, this
-was used to create the dataset for sharing on Hugging Face, (the data is in the test_data
-directory during the review period).
+was used to create the dataset for sharing on Hugging Face. The exact paper test sets are
+versioned as ``data/test_sets/crossdocked.parquet`` and
+``data/test_sets/plinder.parquet``.
 """
 
 import argparse

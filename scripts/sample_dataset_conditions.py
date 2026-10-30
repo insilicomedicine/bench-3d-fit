@@ -2,14 +2,21 @@
 
 Reads a parquet file with ``sdf`` and ``pdb`` columns, samples anchor points,
 pharmacophore points, and pocket-ligand interaction points for each row, and
-writes the augmented parquet with the new JSON columns.
+writes the augmented parquet with the new JSON columns. Input and output
+default to ``data/test_sets/{dataset}.parquet``.
 """
 
-import os
 import argparse
+from pathlib import Path
+
 import pandas as pd
 import json
 from bench_3d_fit.sampling import sample_generation_conditions
+
+DEFAULT_TEST_DATA_ROOT = (
+    Path(__file__).resolve().parents[1] / "data" / "test_sets"
+)
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -18,16 +25,29 @@ def parse_args():
         )
     )
     parser.add_argument(
+        "--dataset",
+        choices=["crossdocked", "plinder"],
+        default="crossdocked",
+        help="Bundled paper test set to process. Defaults to crossdocked.",
+    )
+    parser.add_argument(
         "--input-file",
-        type=str,
-        required=True,
-        help="Path to the input parquet file. Must contain 'sdf' and 'pdb' columns.",
+        type=Path,
+        default=None,
+        help=(
+            "Input parquet containing 'sdf' and 'pdb'. Defaults to "
+            "data/test_sets/{dataset}.parquet."
+        ),
     )
     parser.add_argument(
         "--output-file",
-        type=str,
-        required=True,
-        help="Path to the output parquet file. Will contain 'sdf', 'pdb', and 'gen_conditions_jsons' columns.",
+        type=Path,
+        default=None,
+        help=(
+            "Output parquet with sampled conditions. Defaults to the selected "
+            "data/test_sets/{dataset}.parquet; use --overwrite for in-place "
+            "updates."
+        ),
     )
     parser.add_argument(
         "--min-ph4-features",
@@ -93,9 +113,15 @@ def parse_args():
 
 def main():
     args = parse_args()
-    df = pd.read_parquet(args.input_file)
-    if os.path.exists(args.output_file) and not args.overwrite:
-        raise FileExistsError(f"Output file {args.output_file} already exists. Use --overwrite to overwrite.")
+    default_path = DEFAULT_TEST_DATA_ROOT / f"{args.dataset}.parquet"
+    input_file = default_path if args.input_file is None else args.input_file
+    output_file = default_path if args.output_file is None else args.output_file
+    df = pd.read_parquet(input_file)
+    if output_file.exists() and not args.overwrite:
+        raise FileExistsError(
+            f"Output file {output_file} already exists. "
+            "Use --overwrite to overwrite."
+        )
     anchor_points = []
     pharmacophore_points = []
     pli_points = []
@@ -118,7 +144,8 @@ def main():
     df["anchor_points"] = anchor_points
     df["pharmacophore_points"] = pharmacophore_points
     df["pli_points"] = pli_points
-    df.to_parquet(args.output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(output_file)
     
 if __name__ == "__main__":
     main()

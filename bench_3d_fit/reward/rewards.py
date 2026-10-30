@@ -140,7 +140,8 @@ class PoseBustersReward(RewardFunction):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        with open(Path(__file__).resolve().parents[2] / "configs" / "posebusters.yml", encoding="utf-8") as config_file:
+        config_path = Path(__file__).resolve().parents[1] / "configs" / "posebusters.yml"
+        with config_path.open(encoding="utf-8") as config_file:
             config = safe_load(config_file)
         self.pb_obj = PoseBusters(config=config)
 
